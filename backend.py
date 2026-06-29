@@ -1,5 +1,6 @@
 import os
 import json
+import time
 from flask import Flask, request, Response, jsonify, stream_with_context
 from flask_cors import CORS
 from dotenv import load_dotenv
@@ -16,10 +17,9 @@ app = Flask(__name__)
 CORS(app, origins=["*"])
 
 # ==========================================================
-# Import LangChain modules - FIXED for langgraph 0.0.20
+# Import LangChain modules
 # ==========================================================
 try:
-    # Correct import for this version
     from langgraph.prebuilt.chat_agent_executor import create_react_agent
     from langgraph.checkpoint.memory import MemorySaver
     from langchain_openai import ChatOpenAI
@@ -28,7 +28,6 @@ try:
     print("✅ LangChain modules loaded successfully")
 except ImportError as e:
     print(f"❌ Import error: {e}")
-    # Fallback: Use the old import style
     try:
         from langgraph.prebuilt import create_react_agent
         from langgraph.checkpoint.memory import MemorySaver
@@ -38,7 +37,6 @@ except ImportError as e:
         print("✅ LangChain modules loaded with fallback import")
     except ImportError as e2:
         print(f"❌ All import attempts failed: {e2}")
-        # Exit or handle error appropriately
 
 # ==========================================================
 # Initialize LLM and Tools
@@ -47,9 +45,7 @@ llm = None
 search_tool = None
 agent = None
 
-# Initialize LLM - FIXED: Removed 'proxies' causing parameters
 try:
-    # Only use supported parameters
     llm = ChatOpenAI(
         model="openrouter/free",
         base_url="https://openrouter.ai/api/v1",
@@ -60,7 +56,6 @@ try:
     print("✅ LLM initialized successfully")
 except Exception as e:
     print(f"❌ Failed to initialize LLM: {e}")
-    # Try with even fewer parameters
     try:
         llm = ChatOpenAI(
             model="openrouter/free",
@@ -71,7 +66,6 @@ except Exception as e:
     except Exception as e2:
         print(f"❌ Minimal LLM initialization also failed: {e2}")
 
-# Initialize Tavily search
 try:
     search_tool = TavilySearchResults(
         max_results=3,
@@ -82,7 +76,7 @@ except Exception as e:
     print(f"❌ Failed to initialize Tavily: {e}")
 
 # ==========================================================
-# System Prompt
+# System Prompt - Professional response structure
 # ==========================================================
 SYSTEM_PROMPT = """
 You are DeepChat, an advanced AI assistant with conversational memory and web search capabilities.
@@ -94,6 +88,40 @@ Always run a search if the query involves:
 1. Sports: Match results, tournament brackets, cups won, player stats.
 2. Current Events & News: Breaking news, stocks, releases, technology trends.
 3. Temporal Facts: Anything related to specific years, upcoming dates, or recent changes.
+
+RESPONSE FORMATTING INSTRUCTIONS:
+- Use professional structure with clear headings
+- Use **bold** for emphasis on key terms
+- Use bullet points (-) for lists
+- Use numbered lists for sequential information
+- Use tables for comparative data
+- Use code blocks for code or formulas
+- Use blockquotes for important notes or quotes
+- Keep paragraphs clear and concise
+- Use ## for section headings
+- Use # for main title if needed
+
+Example of good response structure:
+## Main Topic
+Brief introduction paragraph.
+
+**Key Concept**: Explanation of the key concept.
+
+### Subsection
+Detailed explanation with bullet points:
+- Point 1
+- Point 2
+
+| Feature | Description |
+|---------|-------------|
+| Feature 1 | Description 1 |
+| Feature 2 | Description 2 |
+
+> Important note: Additional context.
+
+### Quick Recap
+- Summary point 1
+- Summary point 2
 
 You remember previous turns in this conversation. Use context when the user refers to something previously discussed.
 """
@@ -143,7 +171,7 @@ def home():
 
 @app.route('/api/chat/stream', methods=['POST'])
 def chat_stream():
-    """Stream chat responses using Server-Sent Events (SSE)"""
+    """Stream chat responses using Server-Sent Events (SSE) with word-by-word streaming"""
     if not agent:
         return jsonify({"error": "Agent not initialized. Check server logs."}), 503
     
@@ -162,10 +190,11 @@ def chat_stream():
         print(f"📩 [Thread: {thread_id}] Received: {user_input[:50]}...")
         
         def generate():
-            """Generator for streaming responses"""
+            """Generator for streaming responses with word-by-word delivery"""
             try:
                 full_response = ""
-                # Use invoke for simplicity and compatibility
+                
+                # Invoke the agent
                 response = agent.invoke(
                     {
                         "messages": [
@@ -175,16 +204,24 @@ def chat_stream():
                     },
                     config=config
                 )
+                
                 if response and "messages" in response:
                     last_message = response["messages"][-1]
                     if isinstance(last_message, AIMessage):
                         content = last_message.content
                         if content:
-                            # Simulate streaming by sending the whole response
-                            # For a better streaming experience, consider using a streaming model
-                            chunk_data = json.dumps({'content': content})
-                            yield f"data: {chunk_data}\n\n"
+                            full_response = content
+                            # Split into words and stream word by word
+                            words = content.split(' ')
+                            for i, word in enumerate(words):
+                                # Add space back except for last word
+                                chunk = word
+                                if i < len(words) - 1:
+                                    chunk += ' '
+                                yield f"data: {json.dumps({'content': chunk})}\n\n"
+                                time.sleep(0.05)  # Small delay for word-by-word effect
                 
+                # Send completion signal
                 yield f"data: {json.dumps({'done': True})}\n\n"
                 print(f"✅ [Thread: {thread_id}] Request complete")
                 
@@ -199,7 +236,8 @@ def chat_stream():
             headers={
                 'Cache-Control': 'no-cache',
                 'X-Accel-Buffering': 'no',
-                'Connection': 'keep-alive'
+                'Connection': 'keep-alive',
+                'Content-Type': 'text/event-stream'
             }
         )
         
