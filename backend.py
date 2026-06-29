@@ -16,21 +16,24 @@ app = Flask(__name__)
 CORS(app, origins=["*"])
 
 # ==========================================================
-# Import LangChain modules with correct paths
+# Import LangChain modules - FIXED for langgraph 0.0.20
 # ==========================================================
 try:
-    # Fix: Use correct import for create_react_agent
-    from langgraph.prebuilt import create_react_agent
+    # For langgraph 0.0.20, use tool_executor instead
+    from langgraph.prebuilt.tool_executor import ToolExecutor
+    from langgraph.prebuilt import ToolInvocation
     from langgraph.checkpoint.memory import MemorySaver
     from langchain_openai import ChatOpenAI
     from langchain_community.tools.tavily_search import TavilySearchResults
     from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
+    from langchain_core.tools import tool
     print("✅ LangChain modules loaded successfully")
 except ImportError as e:
     print(f"❌ Import error: {e}")
-    # Try alternative import paths
+    # Try alternative for older langgraph
     try:
-        from langgraph.prebuilt.chat_agent_executor import create_react_agent
+        from langgraph.prebuilt import ToolExecutor
+        from langgraph.prebuilt import ToolInvocation
         from langgraph.checkpoint.memory import MemorySaver
         from langchain_openai import ChatOpenAI
         from langchain_community.tools.tavily_search import TavilySearchResults
@@ -46,34 +49,21 @@ llm = None
 search_tool = None
 agent = None
 
+# Initialize LLM
 try:
-    # Fix: Remove 'proxies' argument - it's not needed
     llm = ChatOpenAI(
         model="openrouter/free",
         base_url="https://openrouter.ai/api/v1",
         api_key=os.getenv("OPENROUTER_API_KEY"),
         temperature=0.2,
         streaming=True,
-        max_tokens=800,
-        timeout=60,
-        # Remove any 'proxies' or 'http_client' parameters
+        max_tokens=800
     )
     print("✅ LLM initialized successfully")
 except Exception as e:
     print(f"❌ Failed to initialize LLM: {e}")
-    # Try with minimal parameters
-    try:
-        llm = ChatOpenAI(
-            model="openrouter/free",
-            base_url="https://openrouter.ai/api/v1",
-            api_key=os.getenv("OPENROUTER_API_KEY"),
-            temperature=0.2,
-            streaming=True
-        )
-        print("✅ LLM initialized with minimal parameters")
-    except Exception as e2:
-        print(f"❌ Minimal LLM initialization also failed: {e2}")
 
+# Initialize Tavily search
 try:
     search_tool = TavilySearchResults(
         max_results=3,
@@ -98,19 +88,16 @@ Always run a search if the query involves:
 3. Temporal Facts: Anything related to specific years, upcoming dates, or recent changes.
 
 You remember previous turns in this conversation. Use context when the user refers to something previously discussed.
-
-When providing responses:
-- Be clear and concise
-- Use bullet points for lists
-- Cite sources when available
-- Be helpful and friendly
 """
 
 # ==========================================================
-# Create Agent with Memory
+# Create Agent with Memory - USING REACT AGENT FROM CORRECT PATH
 # ==========================================================
 try:
     if llm and search_tool:
+        # Use the correct import for react agent in langgraph 0.0.20
+        from langgraph.prebuilt import create_react_agent
+        
         memory = MemorySaver()
         agent = create_react_agent(
             model=llm,
@@ -120,8 +107,52 @@ try:
         print("✅ Agent initialized with conversational memory")
     else:
         print(f"⚠️ Agent not initialized - LLM: {llm is not None}, Search: {search_tool is not None}")
-except Exception as e:
-    print(f"❌ Failed to initialize agent: {e}")
+except ImportError as e:
+    print(f"❌ Import error for create_react_agent: {e}")
+    # Try fallback using tool executor
+    try:
+        from langgraph.prebuilt.tool_executor import ToolExecutor
+        from langgraph.graph import StateGraph, END
+        from langgraph.graph.message import add_messages
+        from typing import TypedDict, Annotated, List
+        from langchain_core.messages import AnyMessage
+        
+        # Create a simple agent with tool executor
+        class AgentState(TypedDict):
+            messages: Annotated[List[AnyMessage], add_messages]
+        
+        # Simple agent implementation
+        def call_model(state):
+            messages = state["messages"]
+            response = llm.invoke(messages)
+            return {"messages": [response]}
+        
+        def call_tool(state):
+            messages = state["messages"]
+            last_message = messages[-1]
+            # Simple tool handling
+            if hasattr(last_message, "tool_calls") and last_message.tool_calls:
+                for tool_call in last_message.tool_calls:
+                    if tool_call["name"] == "tavily_search":
+                        result = search_tool.invoke(tool_call["args"])
+                        return {"messages": [AIMessage(content=str(result))]}
+            return {"messages": []}
+        
+        workflow = StateGraph(AgentState)
+        workflow.add_node("agent", call_model)
+        workflow.add_node("tools", call_tool)
+        workflow.set_entry_point("agent")
+        workflow.add_conditional_edges(
+            "agent",
+            lambda state: "tools" if state["messages"][-1].tool_calls else END,
+            {"tools": "tools", END: END}
+        )
+        workflow.add_edge("tools", "agent")
+        memory = MemorySaver()
+        agent = workflow.compile(checkpointer=memory)
+        print("✅ Fallback agent initialized")
+    except Exception as e2:
+        print(f"❌ Fallback agent initialization failed: {e2}")
 
 # ==========================================================
 # Routes
@@ -173,36 +204,50 @@ def chat_stream():
             """Generator for streaming responses"""
             try:
                 full_response = ""
-                last_content = ""
                 
-                for chunk in agent.stream(
-                    {
-                        "messages": [
-                            SystemMessage(content=SYSTEM_PROMPT),
-                            HumanMessage(content=user_input)
-                        ]
-                    },
-                    config=config,
-                    stream_mode="values"
-                ):
-                    if "messages" in chunk:
-                        last_message = chunk["messages"][-1]
-                        
+                # For simple agent without streaming, get response
+                if hasattr(agent, 'stream'):
+                    # Use streaming if available
+                    for chunk in agent.stream(
+                        {
+                            "messages": [
+                                SystemMessage(content=SYSTEM_PROMPT),
+                                HumanMessage(content=user_input)
+                            ]
+                        },
+                        config=config,
+                        stream_mode="values"
+                    ):
+                        if "messages" in chunk:
+                            last_message = chunk["messages"][-1]
+                            if isinstance(last_message, AIMessage):
+                                content = last_message.content
+                                if isinstance(content, str) and content:
+                                    if len(content) > len(full_response):
+                                        new_text = content[len(full_response):]
+                                        if new_text:
+                                            chunk_data = json.dumps({'content': new_text})
+                                            yield f"data: {chunk_data}\n\n"
+                                            full_response = content
+                else:
+                    # Fallback for non-streaming agent
+                    response = agent.invoke(
+                        {
+                            "messages": [
+                                SystemMessage(content=SYSTEM_PROMPT),
+                                HumanMessage(content=user_input)
+                            ]
+                        },
+                        config=config
+                    )
+                    if response and "messages" in response:
+                        last_message = response["messages"][-1]
                         if isinstance(last_message, AIMessage):
                             content = last_message.content
-                            if isinstance(content, str) and content:
-                                if len(content) > len(full_response):
-                                    new_text = content[len(full_response):]
-                                    if new_text:
-                                        chunk_data = json.dumps({'content': new_text})
-                                        yield f"data: {chunk_data}\n\n"
-                                        full_response = content
-                                elif content != full_response and content != last_content:
-                                    new_text = content
-                                    chunk_data = json.dumps({'content': new_text})
-                                    yield f"data: {chunk_data}\n\n"
-                                    full_response = content
-                                last_content = content
+                            if content:
+                                chunk_data = json.dumps({'content': content})
+                                yield f"data: {chunk_data}\n\n"
+                                full_response = content
                 
                 yield f"data: {json.dumps({'done': True})}\n\n"
                 print(f"✅ [Thread: {thread_id}] Streaming complete")
