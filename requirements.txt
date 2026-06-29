@@ -9,4 +9,3 @@ langchain-openai==0.0.5
 langgraph==0.0.20
 langchain-core==0.1.23
 gunicorn==21.2.0
-tiktoken==0.8.0
