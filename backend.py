@@ -3,8 +3,24 @@ import json
 from flask import Flask, request, Response, jsonify, stream_with_context
 from flask_cors import CORS
 from dotenv import load_dotenv
-from langchain_openai import ChatOpenAI
-from langchain_community.tools.tavily_search import TavilySearchResults
+
+# Try importing with fallbacks
+try:
+    from langchain_openai import ChatOpenAI
+except ImportError:
+    print("⚠️ langchain_openai not found, installing...")
+    import subprocess
+    subprocess.check_call(["pip", "install", "langchain-openai==0.0.8"])
+    from langchain_openai import ChatOpenAI
+
+try:
+    from langchain_community.tools.tavily_search import TavilySearchResults
+except ImportError:
+    print("⚠️ langchain_community not found, installing...")
+    import subprocess
+    subprocess.check_call(["pip", "install", "langchain-community==0.0.10"])
+    from langchain_community.tools.tavily_search import TavilySearchResults
+
 from langgraph.prebuilt import create_react_agent
 from langgraph.checkpoint.memory import InMemorySaver
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
@@ -18,19 +34,21 @@ required_keys = ["OPENROUTER_API_KEY", "TAVILY_API_KEY"]
 missing_keys = [key for key in required_keys if not os.getenv(key)]
 if missing_keys:
     print(f"❌ Missing required API keys: {', '.join(missing_keys)}")
-    # Don't exit in production, let it fail gracefully
-    # exit(1)
+    print("Please add them to your .env file")
 
 # ==========================================================
 # Flask App Setup
 # ==========================================================
 app = Flask(__name__)
-# Update CORS for production - allow your frontend domain
-CORS(app, origins=["*"])  # For development - restrict in production
+CORS(app, origins=["*"])
 
 # ==========================================================
 # LLM Configuration
 # ==========================================================
+llm = None
+search_tool = None
+agent = None
+
 try:
     llm = ChatOpenAI(
         model="openrouter/free",
@@ -77,14 +95,16 @@ You remember previous turns in this conversation. Use context when the user refe
 # Create Agent with Memory
 # ==========================================================
 try:
-    memory = InMemorySaver()
-    
-    agent = create_react_agent(
-        model=llm,
-        tools=[search_tool],
-        checkpointer=memory
-    )
-    print("✅ Automated Agent with Conversational Memory initialized")
+    if llm and search_tool:
+        memory = InMemorySaver()
+        agent = create_react_agent(
+            model=llm,
+            tools=[search_tool],
+            checkpointer=memory
+        )
+        print("✅ Automated Agent with Conversational Memory initialized")
+    else:
+        print("⚠️ Agent not initialized - missing LLM or search tool")
 except Exception as e:
     print(f"❌ Failed to initialize agent: {e}")
 
@@ -95,13 +115,16 @@ except Exception as e:
 def health_check():
     """Health check endpoint"""
     return jsonify({
-        "status": "healthy", 
-        "message": "AI Assistant is running"
+        "status": "healthy" if agent else "degraded",
+        "message": "AI Assistant is running" if agent else "Agent not initialized"
     })
 
 @app.route('/api/chat/stream', methods=['POST'])
 def chat_stream():
     """Stream chat responses using Server-Sent Events (SSE) with Memory"""
+    if not agent:
+        return jsonify({"error": "Agent not initialized"}), 503
+    
     try:
         data = request.get_json()
         if not data or 'message' not in data:
@@ -166,10 +189,9 @@ def chat_stream():
         return jsonify({"error": str(e)}), 500
 
 # ==========================================================
-# Main Entry Point - Modified for Render
+# Main Entry Point
 # ==========================================================
 if __name__ == "__main__":
-    # Use port from environment variable for Render
     port = int(os.environ.get("PORT", 5000))
     print("\n" + "="*50)
     print("🤖 DeepChat AI Backend")
@@ -180,5 +202,5 @@ if __name__ == "__main__":
     app.run(
         host="0.0.0.0",
         port=port,
-        debug=False  # Set to False in production
+        debug=False
     )
