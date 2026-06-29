@@ -1,8 +1,8 @@
 Flask==2.3.3
 flask-cors==4.0.0
 python-dotenv==1.0.0
-langchain==0.1.0
 langchain-openai==0.0.5
-langchain-community==0.0.10
+langchain-community==0.0.20
 langgraph==0.0.20
-tavily-python==0.3.1
+langchain-core==0.1.10
+tavily-python==0.3.0
