@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: deepchat-backend
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn backend:app
+    envVars:
+      - key: OPENROUTER_API_KEY
+        sync: false
+      - key: TAVILY_API_KEY
+        sync: false
