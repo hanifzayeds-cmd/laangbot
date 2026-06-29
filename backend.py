@@ -16,40 +16,74 @@ app = Flask(__name__)
 CORS(app, origins=["*"])
 
 # ==========================================================
-# Import LangChain modules
+# Import LangChain modules with fallbacks
 # ==========================================================
 try:
-    from langchain_openai import ChatOpenAI
-    from langchain_community.tools.tavily_search import TavilySearchResults
+    # Try the correct import for langgraph 0.0.20
     from langgraph.prebuilt import create_react_agent
     from langgraph.checkpoint.memory import MemorySaver
+    from langchain_openai import ChatOpenAI
+    from langchain_community.tools.tavily_search import TavilySearchResults
     from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
     print("✅ LangChain modules loaded successfully")
 except ImportError as e:
     print(f"❌ Import error: {e}")
+    # Try alternative import path
+    try:
+        from langgraph.prebuilt.chat_agent_executor import create_react_agent
+        from langgraph.checkpoint.memory import MemorySaver
+        from langchain_openai import ChatOpenAI
+        from langchain_community.tools.tavily_search import TavilySearchResults
+        from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
+        print("✅ LangChain modules loaded with alternative path")
+    except ImportError as e2:
+        print(f"❌ Alternative import also failed: {e2}")
+        # Fallback: use tool executor approach
+        try:
+            from langgraph.prebuilt.tool_executor import ToolExecutor
+            from langgraph.graph import StateGraph, END
+            from langgraph.graph.message import add_messages
+            from typing import TypedDict, Annotated, List
+            from langchain_core.messages import AnyMessage
+            from langchain_openai import ChatOpenAI
+            from langchain_community.tools.tavily_search import TavilySearchResults
+            from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
+            print("✅ Using fallback tool executor approach")
+        except ImportError as e3:
+            print(f"❌ All import attempts failed: {e3}")
 
 # ==========================================================
-# Initialize LLM and Tools
+# Initialize LLM - FIXED: removed problematic parameters
 # ==========================================================
 llm = None
 search_tool = None
 agent = None
 
-# Initialize LLM - FIXED: removed extra parameters
 try:
+    # Remove 'streaming' and 'max_tokens' to avoid proxies error
     llm = ChatOpenAI(
         model="openrouter/free",
         base_url="https://openrouter.ai/api/v1",
         api_key=os.getenv("OPENROUTER_API_KEY"),
-        temperature=0.2,
-        streaming=True,
-        max_tokens=800
+        temperature=0.2
     )
     print("✅ LLM initialized successfully")
 except Exception as e:
     print(f"❌ Failed to initialize LLM: {e}")
+    # Try with even fewer parameters
+    try:
+        llm = ChatOpenAI(
+            model="openrouter/free",
+            base_url="https://openrouter.ai/api/v1",
+            api_key=os.getenv("OPENROUTER_API_KEY")
+        )
+        print("✅ LLM initialized with minimal parameters")
+    except Exception as e2:
+        print(f"❌ Minimal LLM initialization also failed: {e2}")
 
+# ==========================================================
 # Initialize Tavily search
+# ==========================================================
 try:
     search_tool = TavilySearchResults(
         max_results=3,
@@ -92,6 +126,33 @@ try:
         print(f"⚠️ Agent not initialized - LLM: {llm is not None}, Search: {search_tool is not None}")
 except Exception as e:
     print(f"❌ Failed to initialize agent: {e}")
+    
+    # Fallback: Create a simple agent without react_agent
+    try:
+        print("🔄 Attempting fallback agent creation...")
+        from langgraph.graph import StateGraph, END
+        from langgraph.graph.message import add_messages
+        from typing import TypedDict, Annotated, List
+        from langchain_core.messages import AnyMessage
+        
+        class AgentState(TypedDict):
+            messages: Annotated[List[AnyMessage], add_messages]
+        
+        def call_model(state):
+            messages = state["messages"]
+            response = llm.invoke(messages)
+            return {"messages": [response]}
+        
+        workflow = StateGraph(AgentState)
+        workflow.add_node("agent", call_model)
+        workflow.set_entry_point("agent")
+        workflow.add_edge("agent", END)
+        
+        memory = MemorySaver()
+        agent = workflow.compile(checkpointer=memory)
+        print("✅ Fallback agent created successfully")
+    except Exception as e2:
+        print(f"❌ Fallback agent creation failed: {e2}")
 
 # ==========================================================
 # Routes
@@ -144,28 +205,48 @@ def chat_stream():
             try:
                 full_response = ""
                 
-                for chunk in agent.stream(
-                    {
-                        "messages": [
-                            SystemMessage(content=SYSTEM_PROMPT),
-                            HumanMessage(content=user_input)
-                        ]
-                    },
-                    config=config,
-                    stream_mode="values"
-                ):
-                    if "messages" in chunk:
-                        last_message = chunk["messages"][-1]
-                        
+                # Check if agent supports streaming
+                if hasattr(agent, 'stream'):
+                    for chunk in agent.stream(
+                        {
+                            "messages": [
+                                SystemMessage(content=SYSTEM_PROMPT),
+                                HumanMessage(content=user_input)
+                            ]
+                        },
+                        config=config,
+                        stream_mode="values"
+                    ):
+                        if "messages" in chunk:
+                            last_message = chunk["messages"][-1]
+                            if isinstance(last_message, AIMessage):
+                                content = last_message.content
+                                if isinstance(content, str) and content:
+                                    if len(content) > len(full_response):
+                                        new_text = content[len(full_response):]
+                                        if new_text:
+                                            chunk_data = json.dumps({'content': new_text})
+                                            yield f"data: {chunk_data}\n\n"
+                                            full_response = content
+                else:
+                    # Fallback for non-streaming agent
+                    response = agent.invoke(
+                        {
+                            "messages": [
+                                SystemMessage(content=SYSTEM_PROMPT),
+                                HumanMessage(content=user_input)
+                            ]
+                        },
+                        config=config
+                    )
+                    if response and "messages" in response:
+                        last_message = response["messages"][-1]
                         if isinstance(last_message, AIMessage):
                             content = last_message.content
-                            if isinstance(content, str) and content:
-                                if len(content) > len(full_response):
-                                    new_text = content[len(full_response):]
-                                    if new_text:
-                                        chunk_data = json.dumps({'content': new_text})
-                                        yield f"data: {chunk_data}\n\n"
-                                        full_response = content
+                            if content:
+                                chunk_data = json.dumps({'content': content})
+                                yield f"data: {chunk_data}\n\n"
+                                full_response = content
                 
                 yield f"data: {json.dumps({'done': True})}\n\n"
                 print(f"✅ [Thread: {thread_id}] Streaming complete")
