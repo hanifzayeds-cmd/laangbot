@@ -9,11 +9,6 @@ from dotenv import load_dotenv
 # ==========================================================
 load_dotenv()
 
-required_keys = ["OPENROUTER_API_KEY", "TAVILY_API_KEY"]
-missing_keys = [key for key in required_keys if not os.getenv(key)]
-if missing_keys:
-    print(f"❌ Missing required API keys: {', '.join(missing_keys)}")
-
 # ==========================================================
 # Flask App Setup
 # ==========================================================
@@ -21,18 +16,28 @@ app = Flask(__name__)
 CORS(app, origins=["*"])
 
 # ==========================================================
-# Import LangChain modules with fallback
+# Import LangChain modules with correct paths
 # ==========================================================
 try:
+    # Fix: Use correct import for create_react_agent
+    from langgraph.prebuilt import create_react_agent
+    from langgraph.checkpoint.memory import MemorySaver
     from langchain_openai import ChatOpenAI
     from langchain_community.tools.tavily_search import TavilySearchResults
-    from langgraph.prebuilt import create_react_agent
-    from langgraph.checkpoint.memory import InMemorySaver
     from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
     print("✅ LangChain modules loaded successfully")
-except Exception as e:
-    print(f"❌ Failed to load LangChain: {e}")
-    # Don't exit - let the app still run with degraded functionality
+except ImportError as e:
+    print(f"❌ Import error: {e}")
+    # Try alternative import paths
+    try:
+        from langgraph.prebuilt.chat_agent_executor import create_react_agent
+        from langgraph.checkpoint.memory import MemorySaver
+        from langchain_openai import ChatOpenAI
+        from langchain_community.tools.tavily_search import TavilySearchResults
+        from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
+        print("✅ LangChain modules loaded with alternative paths")
+    except ImportError as e2:
+        print(f"❌ All import attempts failed: {e2}")
 
 # ==========================================================
 # Initialize LLM and Tools
@@ -42,6 +47,7 @@ search_tool = None
 agent = None
 
 try:
+    # Fix: Remove 'proxies' argument - it's not needed
     llm = ChatOpenAI(
         model="openrouter/free",
         base_url="https://openrouter.ai/api/v1",
@@ -49,11 +55,24 @@ try:
         temperature=0.2,
         streaming=True,
         max_tokens=800,
-        timeout=60
+        timeout=60,
+        # Remove any 'proxies' or 'http_client' parameters
     )
     print("✅ LLM initialized successfully")
 except Exception as e:
     print(f"❌ Failed to initialize LLM: {e}")
+    # Try with minimal parameters
+    try:
+        llm = ChatOpenAI(
+            model="openrouter/free",
+            base_url="https://openrouter.ai/api/v1",
+            api_key=os.getenv("OPENROUTER_API_KEY"),
+            temperature=0.2,
+            streaming=True
+        )
+        print("✅ LLM initialized with minimal parameters")
+    except Exception as e2:
+        print(f"❌ Minimal LLM initialization also failed: {e2}")
 
 try:
     search_tool = TavilySearchResults(
@@ -92,7 +111,7 @@ When providing responses:
 # ==========================================================
 try:
     if llm and search_tool:
-        memory = InMemorySaver()
+        memory = MemorySaver()
         agent = create_react_agent(
             model=llm,
             tools=[search_tool],
@@ -100,7 +119,7 @@ try:
         )
         print("✅ Agent initialized with conversational memory")
     else:
-        print("⚠️ Agent not initialized - missing LLM or search tool")
+        print(f"⚠️ Agent not initialized - LLM: {llm is not None}, Search: {search_tool is not None}")
 except Exception as e:
     print(f"❌ Failed to initialize agent: {e}")
 
@@ -134,7 +153,7 @@ def home():
 def chat_stream():
     """Stream chat responses using Server-Sent Events (SSE)"""
     if not agent:
-        return jsonify({"error": "Agent not initialized"}), 503
+        return jsonify({"error": "Agent not initialized. Check server logs."}), 503
     
     try:
         data = request.get_json()
@@ -227,7 +246,7 @@ if __name__ == "__main__":
     print("🤖 DeepChat AI Backend")
     print("="*60)
     print(f"📡 Server running on port {port}")
-    print(f"🌐 Health check: http://localhost:{port}/api/health")
+    print(f"🌐 Health check: https://deepchat-backend-tyss.onrender.com/api/health")
     print("="*60 + "\n")
     
     app.run(
