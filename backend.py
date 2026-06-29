@@ -4,27 +4,6 @@ from flask import Flask, request, Response, jsonify, stream_with_context
 from flask_cors import CORS
 from dotenv import load_dotenv
 
-# Try importing with fallbacks
-try:
-    from langchain_openai import ChatOpenAI
-except ImportError:
-    print("⚠️ langchain_openai not found, installing...")
-    import subprocess
-    subprocess.check_call(["pip", "install", "langchain-openai==0.0.8"])
-    from langchain_openai import ChatOpenAI
-
-try:
-    from langchain_community.tools.tavily_search import TavilySearchResults
-except ImportError:
-    print("⚠️ langchain_community not found, installing...")
-    import subprocess
-    subprocess.check_call(["pip", "install", "langchain-community==0.0.10"])
-    from langchain_community.tools.tavily_search import TavilySearchResults
-
-from langgraph.prebuilt import create_react_agent
-from langgraph.checkpoint.memory import InMemorySaver
-from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
-
 # ==========================================================
 # Load API Keys
 # ==========================================================
@@ -34,7 +13,6 @@ required_keys = ["OPENROUTER_API_KEY", "TAVILY_API_KEY"]
 missing_keys = [key for key in required_keys if not os.getenv(key)]
 if missing_keys:
     print(f"❌ Missing required API keys: {', '.join(missing_keys)}")
-    print("Please add them to your .env file")
 
 # ==========================================================
 # Flask App Setup
@@ -43,7 +21,21 @@ app = Flask(__name__)
 CORS(app, origins=["*"])
 
 # ==========================================================
-# LLM Configuration
+# Import LangChain modules with fallback
+# ==========================================================
+try:
+    from langchain_openai import ChatOpenAI
+    from langchain_community.tools.tavily_search import TavilySearchResults
+    from langgraph.prebuilt import create_react_agent
+    from langgraph.checkpoint.memory import InMemorySaver
+    from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
+    print("✅ LangChain modules loaded successfully")
+except Exception as e:
+    print(f"❌ Failed to load LangChain: {e}")
+    # Don't exit - let the app still run with degraded functionality
+
+# ==========================================================
+# Initialize LLM and Tools
 # ==========================================================
 llm = None
 search_tool = None
@@ -56,15 +48,13 @@ try:
         api_key=os.getenv("OPENROUTER_API_KEY"),
         temperature=0.2,
         streaming=True,
-        max_tokens=800
+        max_tokens=800,
+        timeout=60
     )
     print("✅ LLM initialized successfully")
 except Exception as e:
     print(f"❌ Failed to initialize LLM: {e}")
 
-# ==========================================================
-# Web Search Tool
-# ==========================================================
 try:
     search_tool = TavilySearchResults(
         max_results=3,
@@ -89,6 +79,12 @@ Always run a search if the query involves:
 3. Temporal Facts: Anything related to specific years, upcoming dates, or recent changes.
 
 You remember previous turns in this conversation. Use context when the user refers to something previously discussed.
+
+When providing responses:
+- Be clear and concise
+- Use bullet points for lists
+- Cite sources when available
+- Be helpful and friendly
 """
 
 # ==========================================================
@@ -102,7 +98,7 @@ try:
             tools=[search_tool],
             checkpointer=memory
         )
-        print("✅ Automated Agent with Conversational Memory initialized")
+        print("✅ Agent initialized with conversational memory")
     else:
         print("⚠️ Agent not initialized - missing LLM or search tool")
 except Exception as e:
@@ -116,12 +112,27 @@ def health_check():
     """Health check endpoint"""
     return jsonify({
         "status": "healthy" if agent else "degraded",
-        "message": "AI Assistant is running" if agent else "Agent not initialized"
+        "message": "AI Assistant is running" if agent else "Agent not initialized",
+        "llm_ready": llm is not None,
+        "search_ready": search_tool is not None
+    })
+
+@app.route('/', methods=['GET'])
+def home():
+    """Home endpoint"""
+    return jsonify({
+        "name": "DeepChat AI Backend",
+        "version": "1.0.0",
+        "status": "running",
+        "endpoints": {
+            "/api/health": "Health check",
+            "/api/chat/stream": "Streaming chat endpoint"
+        }
     })
 
 @app.route('/api/chat/stream', methods=['POST'])
 def chat_stream():
-    """Stream chat responses using Server-Sent Events (SSE) with Memory"""
+    """Stream chat responses using Server-Sent Events (SSE)"""
     if not agent:
         return jsonify({"error": "Agent not initialized"}), 503
     
@@ -137,12 +148,13 @@ def chat_stream():
         thread_id = data.get('thread_id', 'default_thread')
         config = {"configurable": {"thread_id": thread_id}}
         
-        print(f"📩 [Thread: {thread_id}] Received: {user_input}")
+        print(f"📩 [Thread: {thread_id}] Received: {user_input[:50]}...")
         
         def generate():
             """Generator for streaming responses"""
             try:
                 full_response = ""
+                last_content = ""
                 
                 for chunk in agent.stream(
                     {
@@ -160,11 +172,18 @@ def chat_stream():
                         if isinstance(last_message, AIMessage):
                             content = last_message.content
                             if isinstance(content, str) and content:
-                                new_text = content[len(full_response):]
-                                if new_text:
+                                if len(content) > len(full_response):
+                                    new_text = content[len(full_response):]
+                                    if new_text:
+                                        chunk_data = json.dumps({'content': new_text})
+                                        yield f"data: {chunk_data}\n\n"
+                                        full_response = content
+                                elif content != full_response and content != last_content:
+                                    new_text = content
                                     chunk_data = json.dumps({'content': new_text})
                                     yield f"data: {chunk_data}\n\n"
                                     full_response = content
+                                last_content = content
                 
                 yield f"data: {json.dumps({'done': True})}\n\n"
                 print(f"✅ [Thread: {thread_id}] Streaming complete")
@@ -189,18 +208,31 @@ def chat_stream():
         return jsonify({"error": str(e)}), 500
 
 # ==========================================================
+# Error Handlers
+# ==========================================================
+@app.errorhandler(404)
+def not_found(error):
+    return jsonify({"error": "Not found"}), 404
+
+@app.errorhandler(500)
+def internal_error(error):
+    return jsonify({"error": "Internal server error"}), 500
+
+# ==========================================================
 # Main Entry Point
 # ==========================================================
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
-    print("\n" + "="*50)
+    print("\n" + "="*60)
     print("🤖 DeepChat AI Backend")
-    print("="*50)
+    print("="*60)
     print(f"📡 Server running on port {port}")
-    print("="*50 + "\n")
+    print(f"🌐 Health check: http://localhost:{port}/api/health")
+    print("="*60 + "\n")
     
     app.run(
         host="0.0.0.0",
         port=port,
-        debug=False
+        debug=False,
+        threaded=True
     )
