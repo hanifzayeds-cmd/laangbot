@@ -14,62 +14,47 @@ from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
 # ==========================================================
 load_dotenv()
 
-# For Render deployment, allow missing keys during build
-# They will be set in Render dashboard
 required_keys = ["OPENROUTER_API_KEY", "TAVILY_API_KEY"]
 missing_keys = [key for key in required_keys if not os.getenv(key)]
 if missing_keys:
-    print(f"⚠️ Missing API keys: {', '.join(missing_keys)}")
-    print("They will be set in production environment")
+    print(f"❌ Missing required API keys: {', '.join(missing_keys)}")
+    # Don't exit in production, let it fail gracefully
+    # exit(1)
 
 # ==========================================================
 # Flask App Setup
 # ==========================================================
 app = Flask(__name__)
-# For production, use specific origins instead of "*"
-CORS(app, origins=[
-    "http://localhost:3000",  # Local dev
-    "https://your-frontend-domain.com"  # Replace with your frontend URL
-])
+# Update CORS for production - allow your frontend domain
+CORS(app, origins=["*"])  # For development - restrict in production
 
 # ==========================================================
 # LLM Configuration
 # ==========================================================
-def initialize_llm():
-    try:
-        llm = ChatOpenAI(
-            model="openrouter/free",
-            base_url="https://openrouter.ai/api/v1",
-            api_key=os.getenv("OPENROUTER_API_KEY"),
-            temperature=0.2,
-            streaming=True,
-            max_tokens=800,
-            timeout=60  # Add timeout
-        )
-        print("✅ LLM initialized successfully")
-        return llm
-    except Exception as e:
-        print(f"❌ Failed to initialize LLM: {e}")
-        return None
-
-llm = initialize_llm()
+try:
+    llm = ChatOpenAI(
+        model="openrouter/free",
+        base_url="https://openrouter.ai/api/v1",
+        api_key=os.getenv("OPENROUTER_API_KEY"),
+        temperature=0.2,
+        streaming=True,
+        max_tokens=800
+    )
+    print("✅ LLM initialized successfully")
+except Exception as e:
+    print(f"❌ Failed to initialize LLM: {e}")
 
 # ==========================================================
 # Web Search Tool
 # ==========================================================
-def initialize_search():
-    try:
-        search_tool = TavilySearchResults(
-            max_results=3,
-            topic="general"
-        )
-        print("✅ Tavily search tool initialized")
-        return search_tool
-    except Exception as e:
-        print(f"❌ Failed to initialize Tavily: {e}")
-        return None
-
-search_tool = initialize_search()
+try:
+    search_tool = TavilySearchResults(
+        max_results=3,
+        topic="general"
+    )
+    print("✅ Tavily search tool initialized")
+except Exception as e:
+    print(f"❌ Failed to initialize Tavily: {e}")
 
 # ==========================================================
 # System Prompt
@@ -91,25 +76,17 @@ You remember previous turns in this conversation. Use context when the user refe
 # ==========================================================
 # Create Agent with Memory
 # ==========================================================
-def initialize_agent():
-    if not llm or not search_tool:
-        print("⚠️ Agent will be initialized when API keys are available")
-        return None
+try:
+    memory = InMemorySaver()
     
-    try:
-        memory = InMemorySaver()
-        agent = create_react_agent(
-            model=llm,
-            tools=[search_tool],
-            checkpointer=memory
-        )
-        print("✅ Automated Agent with Conversational Memory initialized")
-        return agent
-    except Exception as e:
-        print(f"❌ Failed to initialize agent: {e}")
-        return None
-
-agent = initialize_agent()
+    agent = create_react_agent(
+        model=llm,
+        tools=[search_tool],
+        checkpointer=memory
+    )
+    print("✅ Automated Agent with Conversational Memory initialized")
+except Exception as e:
+    print(f"❌ Failed to initialize agent: {e}")
 
 # ==========================================================
 # Routes
@@ -117,21 +94,14 @@ agent = initialize_agent()
 @app.route('/api/health', methods=['GET'])
 def health_check():
     """Health check endpoint"""
-    status = {
-        "status": "healthy",
-        "message": "AI Assistant is running",
-        "agent_ready": agent is not None,
-        "llm_ready": llm is not None,
-        "search_ready": search_tool is not None
-    }
-    return jsonify(status)
+    return jsonify({
+        "status": "healthy", 
+        "message": "AI Assistant is running"
+    })
 
 @app.route('/api/chat/stream', methods=['POST'])
 def chat_stream():
     """Stream chat responses using Server-Sent Events (SSE) with Memory"""
-    if not agent:
-        return jsonify({"error": "Agent not initialized. Check API keys."}), 503
-    
     try:
         data = request.get_json()
         if not data or 'message' not in data:
@@ -195,28 +165,16 @@ def chat_stream():
         print(f"❌ Request Error: {e}")
         return jsonify({"error": str(e)}), 500
 
-@app.route('/', methods=['GET'])
-def home():
-    """Root endpoint"""
-    return jsonify({
-        "service": "DeepChat AI Backend",
-        "status": "running",
-        "endpoints": {
-            "/api/health": "Health check",
-            "/api/chat/stream": "Chat streaming endpoint"
-        }
-    })
-
 # ==========================================================
-# Main Entry Point
+# Main Entry Point - Modified for Render
 # ==========================================================
 if __name__ == "__main__":
+    # Use port from environment variable for Render
+    port = int(os.environ.get("PORT", 5000))
     print("\n" + "="*50)
     print("🤖 DeepChat AI Backend")
     print("="*50)
-    port = int(os.environ.get("PORT", 5000))
-    print(f"📡 Server: http://localhost:{port}")
-    print(f"💡 Press Ctrl+C to stop")
+    print(f"📡 Server running on port {port}")
     print("="*50 + "\n")
     
     app.run(
